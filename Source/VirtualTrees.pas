@@ -1,4 +1,3 @@
-
 unit VirtualTrees;
 
 // The contents of this file are subject to the Mozilla Public License
@@ -72,6 +71,7 @@ interface
   {$HPPEMIT '#pragma comment(lib, "VirtualTreesR")'}
 {$endif}
 {$HPPEMIT '#pragma comment(lib, "Shell32")'}
+{$HPPEMIT '#pragma link "VirtualTrees.Accessibility"'}
 
 uses
   Winapi.Windows, Winapi.oleacc, Winapi.Messages, System.SysUtils, Vcl.Graphics,
@@ -3006,7 +3006,7 @@ type
     procedure CopyToClipboard; virtual;
     procedure CutToClipboard; virtual;
     procedure DeleteChildren(Node: PVirtualNode; ResetHasChildren: Boolean = False);
-    procedure DeleteNode(Node: PVirtualNode); overload; inline;
+    procedure DeleteNode(Node: PVirtualNode; pReIndex: Boolean = True); overload; inline;
     procedure DeleteNodes(const pNodes: TNodeArray);
     procedure DeleteSelectedNodes; virtual;
     function Dragging: Boolean;
@@ -11840,7 +11840,9 @@ begin
             Result := StyleServices.GetSystemColor(FColors[Index]);
         cBorderColor:
           if (seBorder in FOwner.StyleElements) then
-            Result := StyleServices.GetSystemColor(FColors[Index]);
+            Result := StyleServices.GetSystemColor(FColors[Index])
+          else
+            Result := FColors[Index];
         cHotColor:
           if not StyleServices.GetElementColor(StyleServices.GetElementDetails(ttItemHot), ecTextColor, Result) then
             Result := StyleServices.GetSystemColor(FColors[Index]);
@@ -20697,10 +20699,11 @@ begin
       begin
         if DeltaX <> 0 then
         begin
+          UpdateHorizontalScrollBar(suoRepaintScrollBars in Options);
           if (suoRepaintHeader in Options) and (hoVisible in FHeader.FOptions) then
             FHeader.Invalidate(nil);
           if not (tsSizing in FStates) and (FScrollBarOptions.ScrollBars in [System.UITypes.TScrollStyle.ssHorizontal, System.UITypes.TScrollStyle.ssBoth]) then
-            UpdateHorizontalScrollBar(suoRepaintScrollBars in Options);
+            UpdateVerticalScrollBar(suoRepaintScrollBars in Options);
         end;
 
         if (DeltaY <> 0) and ([tsThumbTracking, tsSizing] * FStates = []) then
@@ -21512,10 +21515,14 @@ begin
   begin
     if (SelectedCount = 0) and not SelectionLocked then
     begin
-      if Assigned(FNextNodeToSelect) then
-        Selected[FNextNodeToSelect] := True
-      else
-        Selected[GetFirstVisible] := True;
+      if not Assigned(FNextNodeToSelect) then
+      begin
+        FNextNodeToSelect := GetFirstVisible;
+        // Avoid selecting a disabled node, see #954
+        while Assigned(FNextNodeToSelect) and IsDisabled[FNextNodeToSelect] do
+          FNextNodeToSelect := GetNextVisible(FNextNodeToSelect);
+      end;
+      Selected[FNextNodeToSelect] := True;
       Self.ScrollIntoView(Self.GetFirstSelected, False);
     end;// if nothing selected
     EnsureNodeFocused();
@@ -22532,7 +22539,7 @@ begin
     NewCheckState := DetermineNextCheckState(HitInfo.HitNode.CheckType, HitInfo.HitNode.CheckState);
     if (ssLeft in KeysToShiftState(Message.Keys)) and DoChecking(HitInfo.HitNode, NewCheckState) then
     begin
-      if (Self.SelectedCount > 1) and (Selected[HitInfo.HitNode]) then
+      if (Self.SelectedCount > 1) and (Selected[HitInfo.HitNode]) and not (toSyncCheckboxesWithSelection in TreeOptions.SelectionOptions) then
         SetCheckStateForAll(NewCheckState, True)
       else
         DoCheckClick(HitInfo.HitNode, NewCheckState);
@@ -22849,7 +22856,9 @@ begin
             and (Parent <> FRoot)
         then
           SetCheckState(Node, Node.Parent.CheckState);
-      end;
+      end
+      else if (toSyncCheckboxesWithSelection in TreeOptions.SelectionOptions) then
+        Node.CheckType := TCheckType.ctCheckBox;
 
       if ivsDisabled in InitStates then
         Include(States, vsDisabled);
@@ -23125,11 +23134,11 @@ end;
 
 //----------------------------------------------------------------------------------------------------------------------
 
-procedure TBaseVirtualTree.InternalClearSelection;
+procedure TBaseVirtualTree.InternalClearSelection();
 
 var
   Count: Integer;
-
+  lNode: PVirtualNode;
 begin
   // It is possible that there are invalid node references in the selection array
   // if the tree update is locked and changes in the structure were made.
@@ -23147,11 +23156,12 @@ begin
   while FSelectionCount > 0 do
   begin
     Dec(FSelectionCount);
+    lNode := FSelection[FSelectionCount];
     //sync path note: deselect when click on another or on outside area
-    Exclude(FSelection[FSelectionCount].States, vsSelected);
-    if SyncCheckstateWithSelection[FSelection[FSelectionCount]] then
-      checkstate[FSelection[FSelectionCount]] := csUncheckedNormal;
-    DoRemoveFromSelection(FSelection[FSelectionCount]);
+    Exclude(lNode.States, vsSelected);
+    if SyncCheckstateWithSelection[lNode] then
+      CheckState[lNode] := csUncheckedNormal;
+    DoRemoveFromSelection(lNode);
   end;
   ResetRangeAnchor;
   FSelection := nil;
@@ -23407,7 +23417,7 @@ begin
     //sync path note: deselect when overlapping drawselection is made
     Exclude(Node.States, vsSelected);
     if SyncCheckstateWithSelection[Node] then
-      checkstate[Node] := csUncheckedNormal;
+      Node.CheckState := csUncheckedNormal; // Avoid using SetCheckState() as it handles toSyncCheckboxesWithSelection as well.
     Inc(PAnsiChar(FSelection[Index]));
     DoRemoveFromSelection(Node);
     AdviseChangeEvent(False, Node, crIgnore);
@@ -24633,7 +24643,7 @@ begin
       //sync path note: deselect when a ctrl click removes a selection
       Exclude(Node.States, vsSelected);
       if SyncCheckstateWithSelection[Node] then
-        checkstate[Node] := csUncheckedNormal;
+        Node.CheckState := csUncheckedNormal; // Avoid using SetCheckState() as it handles toSyncCheckboxesWithSelection as well.
 
       if FindNodeInSelection(Node, Index, -1, -1) and (Index < FSelectionCount - 1) then
         Move(FSelection[Index + 1], FSelection[Index], (FSelectionCount - Index - 1) * SizeOf(Pointer));
@@ -26529,9 +26539,9 @@ begin
   end;
 end;
 
-procedure TBaseVirtualTree.DeleteNode(Node: PVirtualNode);
+procedure TBaseVirtualTree.DeleteNode(Node: PVirtualNode; pReIndex: Boolean = True);
 begin
-  DeleteNode(Node, True, False);
+  DeleteNode(Node, pReIndex, False);
 end;
 
 //----------------------------------------------------------------------------------------------------------------------
